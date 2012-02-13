@@ -1,0 +1,142 @@
+#!/usr/bin/perl
+# TOR control port interfacer
+
+use strict;
+package TOR;
+use warnings;
+use Net::Cmd;
+use Data::TreeDumper;
+
+use Getopt::Long;
+use IO::Socket::INET;
+use POSIX;
+
+my $port = 9051;
+my $cmd;
+my $vars;
+my $help;
+my $verbose;
+#my $cmd = "get_circuit_ids";
+$|=1;
+
+GetOptions ('p=i'     => \$port,
+            'vars=s'  => \$vars,
+            'cmd=s'   => \$cmd,
+            'help'    => \$help,
+            'verbose' => \$verbose);
+
+our @ISA = qw(IO::Socket::INET);
+sub new {
+  my ($class) = @_;
+  my $torsock = $class->SUPER::new(PeerAddr=>'localhost',Proto=>'tcp',
+      PeerPort=>$port) or die "localhost:$port: $@\n";
+  $torsock->autoflush(1);
+  return $torsock;
+}
+  
+sub auth {
+  my ($tor) = @_;
+  $tor->send("AUTHENTICATE\r\n");
+}
+
+sub get_cmd {
+  my ($tor, $type, $var, $var_hash) = @_;
+  print "Running control port cmd $type with $var\n";
+  # send command to tor control
+  # panel over socket
+  $tor->send($type.' '.$var."\r\n");
+  # check response
+  my $response = <$tor>;
+  unless ($response =~ /250+/) {
+    die "Error receiving from socket";
+  }
+  if ($type eq 'getconf') {
+    # timeout once we likely get a response from the socket
+    setsockopt( $tor, SOL_SOCKET, SO_RCVTIMEO, pack('L!L!', +1, 0) ); 
+    while (<$tor>) {
+      print $_;
+    }
+    return;
+  }
+  # receive from socket until end
+  while (my $line = <$tor>) {
+    if ($line =~ /^.\r\n$/) {
+      next;
+    }
+    print $line if (defined($verbose));
+    if ($line =~ /250 OK/) {
+      print "Successfully ran cmd $type\n";
+      last;
+    }
+    elsif ($line =~ /^552 Unrecognized/) {
+      print $line;
+      last;
+    }
+    else {
+      $line =~ s/\r\n$//; # remove carriage returns
+      push @{$var_hash->{$var}}, $line if (defined($var_hash));
+    }
+  }
+  return $var_hash;
+}
+
+# circuit-status gets a series of circuit status events
+# each CircuitID is of the form 1*16 IDChar
+sub list_circuit_ids {
+  my ($tor) = @_;
+  my @ids;
+  my $vh = {};
+  $tor->get_cmd('getinfo', 'circuit-status', $vh);
+  my $circuit_events = $vh->{'circuit-status'};
+  my $circuits = {};
+  foreach my $circuit_event (@$circuit_events) {
+    my $status = "LAUNCHED|BUILT|EXTENDED|FAILED|CLOSED";
+    if ($circuit_event =~ /^([0-9]*) ($status) (.*) PURPOSE=(.*)$/) {
+      $circuits->{$1}{status} = $2;
+      $circuits->{$1}{path}   = $3;
+      $circuits->{$1}{purpose} = $4;
+    }
+  }
+  print "circuit ids: ".join(' ', keys %$circuits)."\n";
+}
+
+sub signal_cmd {
+  my ($tor, $type) = @_;
+  my $vh = {};
+  $tor->get_cmd("signal", $type, $vh);
+}
+
+sub print_help_message {
+   print "./tor_cp_interfacer --cmd getinfo
+  --vars [circuit-status|stream-status|info/names|...]\n".
+  "./tor_cp_interfacer --cmd getconf --vars config_values\n";
+  "./tor_cp_interfacer --cmd list-circuit-ids\n".
+  "./tor_cp_interfacer --cmd signal --vars [halt|shutdown|newnym|...]\n";
+}
+
+package main;
+if (not defined($cmd) or defined($help)) {
+  print_help_message();
+  exit;
+}
+$cmd = lc($cmd);
+my $tor = TOR->new();
+$tor->auth();
+if ($cmd eq "list-circuit-ids") {
+  $tor->list_circuit_ids();
+}
+elsif (defined($vars)) {
+  if ($cmd eq 'signal') {
+    $tor->signal_cmd($vars);
+  }
+  else {
+    my @var_names = split(',', $vars);
+    foreach my $var (@var_names) {
+      $tor->get_cmd($cmd, $var);
+    }
+  }
+}
+else {
+  $tor->print_help_message();
+}
+$tor->close();
