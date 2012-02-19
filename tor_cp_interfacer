@@ -35,6 +35,8 @@ sub new {
 }
   
 sub auth {
+
+
   my ($tor) = @_;
   $tor->send("AUTHENTICATE\r\n");
 }
